@@ -1,9 +1,7 @@
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
-import { AllowedSchool } from "../models/AllowedSchool.js";
-import { School } from "../models/School.js";
-import { Student } from "../models/Student.js";
-import { User } from "../models/User.js";
+import { query, withTransaction } from "../config/db.js";
+import { mapStudentRow, mapUserRow } from "../db/mappers.js";
 import { signToken } from "../utils/jwt.js";
 
 const publicUser = (user) => ({
@@ -19,12 +17,28 @@ const publicUser = (user) => ({
 const isSchoolAllowed = async (schoolId) => {
   if (!schoolId) return false;
 
-  const [school, allowEntry] = await Promise.all([
-    School.findOne({ _id: schoolId, isActive: true }).select("_id").lean(),
-    AllowedSchool.findOne({ schoolId }).select("_id").lean()
-  ]);
+  const { rows } = await query(
+    `SELECT s.id
+     FROM schools s
+     INNER JOIN allowed_schools a ON a.school_id = s.id
+     WHERE s.id = $1 AND s.is_active = TRUE
+     LIMIT 1`,
+    [schoolId]
+  );
 
-  return Boolean(school && allowEntry);
+  return rows.length > 0;
+};
+
+const findStudentBySchoolAndAdmission = async (schoolId, admissionNumber) => {
+  const { rows } = await query(
+    `SELECT *
+     FROM students
+     WHERE school_id = $1 AND admission_number = $2
+     LIMIT 1`,
+    [schoolId, admissionNumber]
+  );
+
+  return rows.length ? mapStudentRow(rows[0]) : null;
 };
 
 export const register = async (req, res) => {
@@ -40,18 +54,37 @@ export const register = async (req, res) => {
     childAdmissionNumbers
   } = req.body;
 
-  const school = await School.findOne({ code: String(schoolCode || "").toUpperCase(), isActive: true });
-  if (!school) {
+  const normalizedEmail = String(email || "").toLowerCase();
+  const normalizedCode = String(schoolCode || "").toUpperCase();
+
+  const schoolResult = await query(
+    `SELECT *
+     FROM schools
+     WHERE code = $1 AND is_active = TRUE
+     LIMIT 1`,
+    [normalizedCode]
+  );
+
+  if (!schoolResult.rows.length) {
     return res.status(404).json({ message: "School not found or inactive" });
   }
 
-  const schoolAllowed = await isSchoolAllowed(school._id);
+  const school = schoolResult.rows[0];
+
+  const schoolAllowed = await isSchoolAllowed(school.id);
   if (!schoolAllowed) {
     return res.status(403).json({ message: "This school code is not allowed by owner yet" });
   }
 
-  const existing = await User.findOne({ email: email.toLowerCase() });
-  if (existing) {
+  const existingResult = await query(
+    `SELECT id
+     FROM users
+     WHERE email = $1
+     LIMIT 1`,
+    [normalizedEmail]
+  );
+
+  if (existingResult.rows.length) {
     return res.status(409).json({ message: "Email already registered" });
   }
 
@@ -63,64 +96,110 @@ export const register = async (req, res) => {
       return res.status(400).json({ message: "admissionNumber is required for student role" });
     }
 
-    let student = await Student.findOne({ schoolId: school._id, admissionNumber: String(admissionNumber).trim() });
+    const normalizedAdmission = String(admissionNumber).trim();
+    let student = await findStudentBySchoolAndAdmission(school.id, normalizedAdmission);
+
     if (!student) {
-      student = await Student.create({
-        schoolId: school._id,
-        admissionNumber: String(admissionNumber).trim(),
-        fullName,
-        grade: grade || "NA",
-        section: section || "A"
-      });
+      const createStudentResult = await query(
+        `INSERT INTO students (
+          school_id,
+          admission_number,
+          full_name,
+          grade,
+          section
+        )
+        VALUES ($1, $2, $3, $4, $5)
+        RETURNING *`,
+        [school.id, normalizedAdmission, fullName, grade || "NA", section || "A"]
+      );
+
+      student = mapStudentRow(createStudentResult.rows[0]);
     }
 
     studentProfileId = student._id;
   }
 
   if (role === "parent" && Array.isArray(childAdmissionNumbers) && childAdmissionNumbers.length) {
-    const children = await Student.find({
-      schoolId: school._id,
-      admissionNumber: { $in: childAdmissionNumbers.map((item) => String(item).trim()) }
-    }).select("_id");
+    const normalizedAdmissions = childAdmissionNumbers.map((item) => String(item).trim());
 
-    childStudentIds = children.map((student) => student._id);
+    const childrenResult = await query(
+      `SELECT id
+       FROM students
+       WHERE school_id = $1
+         AND admission_number = ANY($2::text[])`,
+      [school.id, normalizedAdmissions]
+    );
+
+    childStudentIds = childrenResult.rows.map((row) => row.id);
   }
 
   const passwordHash = await bcrypt.hash(password, 12);
-  const user = await User.create({
-    fullName,
-    email: email.toLowerCase(),
-    passwordHash,
-    role,
-    schoolId: school._id,
-    studentProfileId,
-    childStudentIds
+
+  const createdUser = await withTransaction(async (client) => {
+    const userInsert = await client.query(
+      `INSERT INTO users (
+        full_name,
+        email,
+        password_hash,
+        role,
+        school_id,
+        student_profile_id,
+        child_student_ids
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7::uuid[])
+      RETURNING *`,
+      [
+        fullName,
+        normalizedEmail,
+        passwordHash,
+        role,
+        school.id,
+        studentProfileId,
+        childStudentIds
+      ]
+    );
+
+    const user = mapUserRow(userInsert.rows[0]);
+
+    if (role === "parent" && childStudentIds.length) {
+      await client.query(
+        `UPDATE students
+         SET parent_user_ids = ARRAY(
+           SELECT DISTINCT item
+           FROM unnest(parent_user_ids || $1::uuid[]) AS item
+         )
+         WHERE id = ANY($2::uuid[])`,
+        [[user._id], childStudentIds]
+      );
+    }
+
+    return user;
   });
 
-  if (role === "parent" && childStudentIds.length) {
-    await Student.updateMany(
-      { _id: { $in: childStudentIds } },
-      {
-        $addToSet: { parentUserIds: user._id }
-      }
-    );
-  }
-
-  const token = signToken(user);
+  const token = signToken(createdUser);
 
   return res.status(201).json({
     token,
-    user: publicUser(user)
+    user: publicUser(createdUser)
   });
 };
 
 export const login = async (req, res) => {
   const { email, password } = req.body;
 
-  const user = await User.findOne({ email: String(email).toLowerCase(), isActive: true });
-  if (!user) {
+  const { rows } = await query(
+    `SELECT *
+     FROM users
+     WHERE email = $1 AND is_active = TRUE
+     LIMIT 1`,
+    [String(email).toLowerCase()]
+  );
+
+  if (!rows.length) {
     return res.status(401).json({ message: "Invalid credentials" });
   }
+
+  const user = mapUserRow(rows[0]);
 
   const isPasswordValid = await bcrypt.compare(password, user.passwordHash);
   if (!isPasswordValid) {
@@ -144,18 +223,29 @@ export const forgotPassword = async (req, res) => {
     return res.status(400).json({ message: "email is required" });
   }
 
-  const user = await User.findOne({ email, isActive: true });
+  const { rows } = await query(
+    `SELECT *
+     FROM users
+     WHERE email = $1 AND is_active = TRUE
+     LIMIT 1`,
+    [email]
+  );
 
-  if (!user) {
+  if (!rows.length) {
     return res.json({ message: "If the email exists, a reset token has been generated" });
   }
 
+  const user = mapUserRow(rows[0]);
   const resetToken = crypto.randomBytes(20).toString("hex");
   const passwordResetExpiresAt = new Date(Date.now() + 15 * 60 * 1000);
 
-  user.passwordResetToken = resetToken;
-  user.passwordResetExpiresAt = passwordResetExpiresAt;
-  await user.save();
+  await query(
+    `UPDATE users
+     SET password_reset_token = $1,
+         password_reset_expires_at = $2
+     WHERE id = $3`,
+    [resetToken, passwordResetExpiresAt, user._id]
+  );
 
   return res.json({
     message: "Reset token generated (demo mode). Use this token on reset page.",
@@ -176,20 +266,31 @@ export const resetPassword = async (req, res) => {
     return res.status(400).json({ message: "Password must be at least 8 characters" });
   }
 
-  const user = await User.findOne({
-    passwordResetToken: token,
-    passwordResetExpiresAt: { $gt: new Date() },
-    isActive: true
-  });
+  const { rows } = await query(
+    `SELECT *
+     FROM users
+     WHERE password_reset_token = $1
+       AND password_reset_expires_at > NOW()
+       AND is_active = TRUE
+     LIMIT 1`,
+    [token]
+  );
 
-  if (!user) {
+  if (!rows.length) {
     return res.status(400).json({ message: "Invalid or expired reset token" });
   }
 
-  user.passwordHash = await bcrypt.hash(newPassword, 12);
-  user.passwordResetToken = null;
-  user.passwordResetExpiresAt = null;
-  await user.save();
+  const user = mapUserRow(rows[0]);
+  const passwordHash = await bcrypt.hash(newPassword, 12);
+
+  await query(
+    `UPDATE users
+     SET password_hash = $1,
+         password_reset_token = NULL,
+         password_reset_expires_at = NULL
+     WHERE id = $2`,
+    [passwordHash, user._id]
+  );
 
   return res.json({ message: "Password reset successful" });
 };

@@ -1,4 +1,5 @@
-import { Student } from "../models/Student.js";
+import { query } from "../config/db.js";
+import { mapStudentRow } from "../db/mappers.js";
 import { evaluateStudentInsights } from "../services/insightService.js";
 import { predictRiskLevel } from "../services/mlService.js";
 
@@ -20,11 +21,20 @@ export const predictRisk = async (req, res) => {
 };
 
 export const predictRiskForStudent = async (req, res) => {
-  const student = await Student.findOne({ _id: req.params.studentId, schoolId: req.user.schoolId }).lean();
+  const studentResult = await query(
+    `SELECT *
+     FROM students
+     WHERE id = $1
+       AND school_id = $2
+     LIMIT 1`,
+    [req.params.studentId, req.user.schoolId]
+  );
 
-  if (!student) {
+  if (!studentResult.rows.length) {
     return res.status(404).json({ message: "Student not found in your school" });
   }
+
+  const student = mapStudentRow(studentResult.rows[0]);
 
   const insightData = await evaluateStudentInsights({
     schoolId: req.user.schoolId,

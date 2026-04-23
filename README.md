@@ -5,7 +5,7 @@ Refined full-stack project for role-based student performance tracking with real
 ## Stack
 - Frontend: React + Vite + Tailwind CSS
 - Backend: Node.js + Express + Socket.io
-- Database: MongoDB + Mongoose
+- Database: PostgreSQL
 - Auth: JWT + bcrypt
 - ML integration: Python service via `/api/ml/predict` (with backend heuristic fallback)
 
@@ -16,14 +16,14 @@ Refined full-stack project for role-based student performance tracking with real
 - Student
 - Parent
 
-## Core Features (Refined)
+## Core Features
 - JWT login, signup, forgot-password, reset-password
 - Role-protected dashboards
 - Owner school allowlist control
 - Only owner-allowed schools can register/login with school code
 - Owner sees all schools + account breakdown
 - Admin is restricted to one school (`schoolId`) and manages only that school's users/students/subjects/analytics
-- Teacher marks, attendance, and timetable management
+- Teacher marks, attendance, timetable, extracurricular management
 - Student and parent analytics views with charts
 - Real-time dashboard refresh using Socket.io
 - AI chat assistant (`/api/ai/chat`) for teacher/student
@@ -31,16 +31,13 @@ Refined full-stack project for role-based student performance tracking with real
 - Notification storage and realtime notification events
 - Rate limiting, Helmet, Morgan logging, validation middleware
 
-## Timetable Flow
-- Teacher sets weekly slots in `Time table` page via `/api/teacher/timetable` APIs.
-- Student reads class timetable from `/api/student/timetable`.
-- Timetable updates are pushed in realtime (`timetable:updated`) to connected dashboards.
-
 ## Local Setup (VS Code)
 
-### 1. Start MongoDB
-Use local MongoDB (default expected URI in `.env.example`):
-- `mongodb://127.0.0.1:27017/spt_db`
+### 1. Start PostgreSQL and create database
+Create database `spt_db` and a user with access.
+
+Example connection string:
+`postgresql://postgres:postgres@127.0.0.1:5432/spt_db`
 
 ### 2. Backend
 ```powershell
@@ -50,6 +47,7 @@ npm install
 npm run seed
 npm run dev
 ```
+
 Backend runs on `http://localhost:5000`.
 
 ### 3. Frontend
@@ -58,6 +56,7 @@ cd frontend
 npm install
 npm run dev
 ```
+
 Frontend runs on `http://localhost:5173`.
 
 ## Demo Accounts (Quick Login)
@@ -72,19 +71,20 @@ Seed school code for signup: `GFPS01`
 
 ## Accessing the Database
 
-### MongoDB Compass
-1. Open MongoDB Compass.
-2. Connect to `mongodb://127.0.0.1:27017`.
-3. Open database `spt_db`.
-
-### Mongo Shell
+### psql CLI
 ```powershell
-mongosh
-use spt_db
-show collections
+psql "postgresql://postgres:postgres@127.0.0.1:5432/spt_db"
+\dt
+SELECT * FROM users;
 ```
 
+### pgAdmin
+1. Open pgAdmin.
+2. Register a server (host/port/user/password).
+3. Open database `spt_db` and browse tables.
+
 ## Notes
+- Schema bootstrap is auto-applied by backend startup using `backend/sql/postgres_schema.sql`.
 - Realtime events are emitted through Socket.io rooms by school/student/user.
 - If Python ML service is down, backend falls back to heuristic risk prediction automatically.
 - Owner can allow/remove schools from `Owner Dashboard`; blocked schools cannot log in or sign up.

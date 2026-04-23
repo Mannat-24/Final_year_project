@@ -1,17 +1,50 @@
-import { AttendanceRecord } from "../models/AttendanceRecord.js";
-import { Notification } from "../models/Notification.js";
-import { PerformanceRecord } from "../models/PerformanceRecord.js";
-import { School } from "../models/School.js";
-import { Student } from "../models/Student.js";
+import { query } from "../config/db.js";
+import { mapAttendanceRow, mapNotificationRow, mapSchoolRow, mapStudentRow } from "../db/mappers.js";
 import { evaluateStudentInsights } from "../services/insightService.js";
 import { buildStudentReportPdf } from "../services/reportService.js";
 
+const mapPerformanceWithSubject = (row) => ({
+  _id: row.id,
+  schoolId: row.school_id,
+  studentId: row.student_id,
+  subjectId: {
+    _id: row.subject_id,
+    name: row.subject_name,
+    code: row.subject_code
+  },
+  teacherUserId: row.teacher_user_id,
+  examType: row.exam_type,
+  marksObtained: Number(row.marks_obtained),
+  maxMarks: Number(row.max_marks),
+  examDate: row.exam_date,
+  remark: row.remark || "",
+  riskLevel: row.risk_level || "Low",
+  createdAt: row.created_at,
+  updatedAt: row.updated_at
+});
+
 const getParentChildren = async (user) => {
   if (user.childStudentIds?.length) {
-    return Student.find({ _id: { $in: user.childStudentIds }, schoolId: user.schoolId }).lean();
+    const { rows } = await query(
+      `SELECT *
+       FROM students
+       WHERE id = ANY($1::uuid[])
+         AND school_id = $2`,
+      [user.childStudentIds, user.schoolId]
+    );
+
+    return rows.map((row) => mapStudentRow(row));
   }
 
-  return Student.find({ schoolId: user.schoolId, parentUserIds: user._id }).lean();
+  const { rows } = await query(
+    `SELECT *
+     FROM students
+     WHERE school_id = $1
+       AND parent_user_ids @> ARRAY[$2]::uuid[]`,
+    [user.schoolId, user._id]
+  );
+
+  return rows.map((row) => mapStudentRow(row));
 };
 
 export const parentDashboard = async (req, res) => {
@@ -35,10 +68,16 @@ export const parentDashboard = async (req, res) => {
     })
   );
 
-  const notifications = await Notification.find({ recipientUserId: req.user._id })
-    .sort({ createdAt: -1 })
-    .limit(20)
-    .lean();
+  const notificationsResult = await query(
+    `SELECT *
+     FROM notifications
+     WHERE recipient_user_id = $1
+     ORDER BY created_at DESC
+     LIMIT 20`,
+    [req.user._id]
+  );
+
+  const notifications = notificationsResult.rows.map((row) => mapNotificationRow(row));
 
   return res.json({
     children: childSummaries,
@@ -54,18 +93,34 @@ export const childProgress = async (req, res) => {
     return res.status(404).json({ message: "Child not found for this parent account" });
   }
 
-  const [insights, performance, attendance] = await Promise.all([
+  const [insights, performanceResult, attendanceResult] = await Promise.all([
     evaluateStudentInsights({ schoolId: req.user.schoolId, studentId: child._id, notify: false }),
-    PerformanceRecord.find({ schoolId: req.user.schoolId, studentId: child._id })
-      .populate("subjectId", "name code")
-      .sort({ examDate: -1 })
-      .limit(30)
-      .lean(),
-    AttendanceRecord.find({ schoolId: req.user.schoolId, studentId: child._id })
-      .sort({ date: -1 })
-      .limit(30)
-      .lean()
+    query(
+      `SELECT
+         pr.*,
+         subj.name AS subject_name,
+         subj.code AS subject_code
+       FROM performance_records pr
+       INNER JOIN subjects subj ON subj.id = pr.subject_id
+       WHERE pr.school_id = $1
+         AND pr.student_id = $2
+       ORDER BY pr.exam_date DESC
+       LIMIT 30`,
+      [req.user.schoolId, child._id]
+    ),
+    query(
+      `SELECT *
+       FROM attendance_records
+       WHERE school_id = $1
+         AND student_id = $2
+       ORDER BY date DESC
+       LIMIT 30`,
+      [req.user.schoolId, child._id]
+    )
   ]);
+
+  const performance = performanceResult.rows.map((row) => mapPerformanceWithSubject(row));
+  const attendance = attendanceResult.rows.map((row) => mapAttendanceRow(row));
 
   return res.json({
     child,
@@ -89,14 +144,37 @@ export const downloadChildReport = async (req, res) => {
     return res.status(404).json({ message: "Child not found for this parent account" });
   }
 
-  const school = await School.findById(req.user.schoolId).lean();
-  const [performanceRecords, insightsData] = await Promise.all([
-    PerformanceRecord.find({ schoolId: req.user.schoolId, studentId: child._id })
-      .populate("subjectId", "name code")
-      .sort({ examDate: 1 })
-      .lean(),
+  const schoolResult = await query(
+    `SELECT *
+     FROM schools
+     WHERE id = $1
+     LIMIT 1`,
+    [req.user.schoolId]
+  );
+
+  const school = schoolResult.rows.length ? mapSchoolRow(schoolResult.rows[0]) : null;
+
+  if (!school) {
+    return res.status(404).json({ message: "School not found for parent account" });
+  }
+
+  const [performanceResult, insightsData] = await Promise.all([
+    query(
+      `SELECT
+         pr.*,
+         subj.name AS subject_name,
+         subj.code AS subject_code
+       FROM performance_records pr
+       INNER JOIN subjects subj ON subj.id = pr.subject_id
+       WHERE pr.school_id = $1
+         AND pr.student_id = $2
+       ORDER BY pr.exam_date ASC`,
+      [req.user.schoolId, child._id]
+    ),
     evaluateStudentInsights({ schoolId: req.user.schoolId, studentId: child._id, notify: false })
   ]);
+
+  const performanceRecords = performanceResult.rows.map((row) => mapPerformanceWithSubject(row));
 
   const pdfBuffer = await buildStudentReportPdf({
     school,
@@ -112,3 +190,4 @@ export const downloadChildReport = async (req, res) => {
   res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
   return res.send(pdfBuffer);
 };
+

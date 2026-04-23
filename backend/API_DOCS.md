@@ -5,49 +5,52 @@ Base URL: `http://localhost:5000/api`
 ## Authentication
 - JWT is returned from `/auth/login` and `/auth/register`.
 - Send token in header: `Authorization: Bearer <token>`.
-- Roles: `admin`, `teacher`, `student`, `parent`.
+- Roles: `owner`, `admin`, `teacher`, `student`, `parent`.
+
+## Database
+- PostgreSQL with UUID primary keys.
+- Schema file: `backend/sql/postgres_schema.sql`.
 
 ## Multi-School Isolation
-- Every user has `schoolId`.
-- Protected endpoints always filter by `req.user.schoolId`.
+- Every non-owner user has `schoolId`.
+- Protected endpoints filter by `req.user.schoolId`.
 - Cross-school access is rejected.
 
 ## Auth Endpoints
 ### `POST /auth/register`
 Registers a user under a school code.
-```json
-{
-  "fullName": "Rahul Verma",
-  "email": "student@gfps.edu",
-  "password": "Student@123",
-  "role": "student",
-  "schoolCode": "GFPS01",
-  "admissionNumber": "GFPS-1001",
-  "grade": "10",
-  "section": "A"
-}
-```
 
 ### `POST /auth/login`
-```json
-{
-  "email": "teacher@gfps.edu",
-  "password": "Teacher@123"
-}
-```
+Returns `{ token, user }`.
+
+### `POST /auth/forgot-password`
+Generates reset token (demo flow).
+
+### `POST /auth/reset-password`
+Resets password using reset token.
 
 ### `GET /auth/me`
 Returns authenticated user profile.
 
-## Admin Endpoints (`admin` only)
-### `POST /admin/schools`
-Create a school.
+## Owner Endpoints (`owner` only)
+### `GET /owner/schools`
+List all schools with allowlist/account summary.
 
-### `GET /admin/schools?page=1&limit=20`
-List schools (paginated).
+### `POST /owner/schools`
+Create school (optional immediate allowlist).
+
+### `POST /owner/schools/:schoolId/allow`
+Allow school login/signup.
+
+### `DELETE /owner/schools/:schoolId/allow`
+Remove school from allowlist.
+
+## Admin Endpoints (`admin` only)
+### `GET /admin/school`
+Admin school profile + role counts.
 
 ### `POST /admin/users`
-Create teacher/parent/admin/student in current school.
+Create teacher/parent/admin/student user in current school.
 
 ### `GET /admin/users?role=teacher&page=1&limit=20`
 List school users (paginated).
@@ -57,6 +60,9 @@ Create student profile.
 
 ### `GET /admin/students?page=1&limit=20&grade=10`
 List student profiles (paginated).
+
+### `GET /admin/student-classes`
+List grade-section groups.
 
 ### `POST /admin/subjects`
 Create subject.
@@ -70,6 +76,7 @@ School-wide analytics:
 - attendance percentage
 - monthly performance trend
 - role distribution
+- class-wise attendance table
 
 ## Teacher Endpoints (`teacher` only)
 ### `GET /teacher/dashboard`
@@ -78,46 +85,45 @@ Teacher summary and latest activity.
 ### `GET /teacher/reference`
 Students + subjects for entry forms.
 
+### `GET /teacher/performance`
+Paginated performance records.
+
+### `GET /teacher/attendance`
+Paginated attendance records.
+
+### `GET /teacher/timetable`
+Class timetable view.
+
+### `GET /teacher/extracurricular`
+Paginated extracurricular records.
+
 ### `POST /teacher/performance`
-Create or update marks.
-```json
-{
-  "studentId": "<ObjectId>",
-  "subjectId": "<ObjectId>",
-  "examType": "UT-2",
-  "marksObtained": 13,
-  "maxMarks": 20,
-  "examDate": "2026-03-20T00:00:00.000Z",
-  "remark": "Needs more revision"
-}
-```
+Create or update marks (uses `recordId` for update).
 
 ### `POST /teacher/attendance`
 Upsert attendance by date.
-```json
-{
-  "studentId": "<ObjectId>",
-  "date": "2026-03-26T00:00:00.000Z",
-  "status": "Absent",
-  "remark": "Medical leave"
-}
-```
 
-### `GET /teacher/performance?page=1&limit=20&studentId=<id>`
-Paginated marks records.
+### `POST /teacher/timetable/slot`
+Upsert timetable slot.
 
-### `GET /teacher/attendance?page=1&limit=20&studentId=<id>`
-Paginated attendance records.
+### `DELETE /teacher/timetable/slot`
+Delete timetable slot.
+
+### `POST /teacher/extracurricular`
+Create or update extracurricular record (uses `recordId` for update).
 
 ## Student Endpoints (`student` only)
 ### `GET /student/dashboard`
-Returns metrics, trends, insights, recent performance and attendance.
+Metrics, trends, insights, recent performance/attendance, notifications.
 
 ### `GET /student/performance?page=1&limit=20`
 Paginated marks.
 
 ### `GET /student/attendance?page=1&limit=20`
 Paginated attendance.
+
+### `GET /student/timetable`
+Weekly timetable for student class.
 
 ### `GET /student/report`
 Downloads PDF report card.
@@ -145,24 +151,21 @@ Mark all notifications as read.
 ## ML Endpoints
 ### `POST /ml/predict`
 Manual risk prediction.
-```json
-{
-  "marks": 58,
-  "attendance": 72,
-  "pastPerformance": 61
-}
-```
 
 ### `GET /ml/predict/student/:studentId`
 Predict risk from stored student data (`admin`/`teacher`).
+
+## AI Endpoints
+### `POST /ai/chat`
+AI assistant response with context-aware insight payload.
 
 ## Real-Time Events (Socket.io)
 Client connects with auth payload:
 ```json
 {
-  "userId": "<ObjectId>",
-  "schoolId": "<ObjectId>",
-  "studentId": "<ObjectId optional>"
+  "userId": "<UUID>",
+  "schoolId": "<UUID>",
+  "studentId": "<UUID optional>"
 }
 ```
 
@@ -170,6 +173,8 @@ Broadcast events:
 - `performance:updated`
 - `attendance:updated`
 - `notification:new`
+- `timetable:updated`
+- `extracurricular:updated`
 
 Rooms:
 - `school:<schoolId>`

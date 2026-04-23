@@ -1,9 +1,5 @@
-import { AttendanceRecord } from "../models/AttendanceRecord.js";
-import { Notification } from "../models/Notification.js";
-import { PerformanceRecord } from "../models/PerformanceRecord.js";
-import { School } from "../models/School.js";
-import { Student } from "../models/Student.js";
-import { TimeTableSlot } from "../models/TimeTableSlot.js";
+import { query } from "../config/db.js";
+import { mapAttendanceRow, mapNotificationRow, mapSchoolRow, mapStudentRow } from "../db/mappers.js";
 import { evaluateStudentInsights } from "../services/insightService.js";
 import { buildStudentReportPdf } from "../services/reportService.js";
 import { buildPageMeta, getPagination } from "../utils/pagination.js";
@@ -19,9 +15,40 @@ const dayOrder = {
 
 const toClassName = (grade, section) => `Class ${String(grade).trim()}-${String(section || "A").trim()}`;
 
+const mapPerformanceWithSubject = (row) => ({
+  _id: row.id,
+  schoolId: row.school_id,
+  studentId: row.student_id,
+  subjectId: {
+    _id: row.subject_id,
+    name: row.subject_name,
+    code: row.subject_code
+  },
+  teacherUserId: row.teacher_user_id,
+  examType: row.exam_type,
+  marksObtained: Number(row.marks_obtained),
+  maxMarks: Number(row.max_marks),
+  examDate: row.exam_date,
+  remark: row.remark || "",
+  riskLevel: row.risk_level || "Low",
+  createdAt: row.created_at,
+  updatedAt: row.updated_at
+});
+
 const resolveStudentForUser = async (user) => {
   if (!user.studentProfileId) return null;
-  return Student.findOne({ _id: user.studentProfileId, schoolId: user.schoolId }).lean();
+
+  const { rows } = await query(
+    `SELECT *
+     FROM students
+     WHERE id = $1
+       AND school_id = $2
+     LIMIT 1`,
+    [user.studentProfileId, user.schoolId]
+  );
+
+  if (!rows.length) return null;
+  return mapStudentRow(rows[0]);
 };
 
 export const studentDashboard = async (req, res) => {
@@ -30,19 +57,43 @@ export const studentDashboard = async (req, res) => {
     return res.status(404).json({ message: "Student profile not linked for this account" });
   }
 
-  const [insightData, recentPerformance, recentAttendance, notifications] = await Promise.all([
+  const [insightData, performanceResult, attendanceResult, notificationsResult] = await Promise.all([
     evaluateStudentInsights({ schoolId: req.user.schoolId, studentId: student._id, notify: false }),
-    PerformanceRecord.find({ schoolId: req.user.schoolId, studentId: student._id })
-      .populate("subjectId", "name code")
-      .sort({ examDate: -1 })
-      .limit(12)
-      .lean(),
-    AttendanceRecord.find({ schoolId: req.user.schoolId, studentId: student._id })
-      .sort({ date: -1 })
-      .limit(20)
-      .lean(),
-    Notification.find({ recipientUserId: req.user._id }).sort({ createdAt: -1 }).limit(10).lean()
+    query(
+      `SELECT
+         pr.*,
+         subj.name AS subject_name,
+         subj.code AS subject_code
+       FROM performance_records pr
+       INNER JOIN subjects subj ON subj.id = pr.subject_id
+       WHERE pr.school_id = $1
+         AND pr.student_id = $2
+       ORDER BY pr.exam_date DESC
+       LIMIT 12`,
+      [req.user.schoolId, student._id]
+    ),
+    query(
+      `SELECT *
+       FROM attendance_records
+       WHERE school_id = $1
+         AND student_id = $2
+       ORDER BY date DESC
+       LIMIT 20`,
+      [req.user.schoolId, student._id]
+    ),
+    query(
+      `SELECT *
+       FROM notifications
+       WHERE recipient_user_id = $1
+       ORDER BY created_at DESC
+       LIMIT 10`,
+      [req.user._id]
+    )
   ]);
+
+  const recentPerformance = performanceResult.rows.map((row) => mapPerformanceWithSubject(row));
+  const recentAttendance = attendanceResult.rows.map((row) => mapAttendanceRow(row));
+  const notifications = notificationsResult.rows.map((row) => mapNotificationRow(row));
 
   return res.json({
     student,
@@ -67,15 +118,32 @@ export const listStudentPerformance = async (req, res) => {
 
   const { page, limit, skip } = getPagination(req.query);
 
-  const [items, total] = await Promise.all([
-    PerformanceRecord.find({ schoolId: req.user.schoolId, studentId: student._id })
-      .populate("subjectId", "name code")
-      .sort({ examDate: -1 })
-      .skip(skip)
-      .limit(limit)
-      .lean(),
-    PerformanceRecord.countDocuments({ schoolId: req.user.schoolId, studentId: student._id })
+  const [itemsResult, totalResult] = await Promise.all([
+    query(
+      `SELECT
+         pr.*,
+         subj.name AS subject_name,
+         subj.code AS subject_code
+       FROM performance_records pr
+       INNER JOIN subjects subj ON subj.id = pr.subject_id
+       WHERE pr.school_id = $1
+         AND pr.student_id = $2
+       ORDER BY pr.exam_date DESC
+       OFFSET $3
+       LIMIT $4`,
+      [req.user.schoolId, student._id, skip, limit]
+    ),
+    query(
+      `SELECT COUNT(*)::int AS count
+       FROM performance_records
+       WHERE school_id = $1
+         AND student_id = $2`,
+      [req.user.schoolId, student._id]
+    )
   ]);
+
+  const items = itemsResult.rows.map((row) => mapPerformanceWithSubject(row));
+  const total = Number(totalResult.rows[0]?.count || 0);
 
   return res.json({
     items,
@@ -91,14 +159,28 @@ export const listStudentAttendance = async (req, res) => {
 
   const { page, limit, skip } = getPagination(req.query);
 
-  const [items, total] = await Promise.all([
-    AttendanceRecord.find({ schoolId: req.user.schoolId, studentId: student._id })
-      .sort({ date: -1 })
-      .skip(skip)
-      .limit(limit)
-      .lean(),
-    AttendanceRecord.countDocuments({ schoolId: req.user.schoolId, studentId: student._id })
+  const [itemsResult, totalResult] = await Promise.all([
+    query(
+      `SELECT *
+       FROM attendance_records
+       WHERE school_id = $1
+         AND student_id = $2
+       ORDER BY date DESC
+       OFFSET $3
+       LIMIT $4`,
+      [req.user.schoolId, student._id, skip, limit]
+    ),
+    query(
+      `SELECT COUNT(*)::int AS count
+       FROM attendance_records
+       WHERE school_id = $1
+         AND student_id = $2`,
+      [req.user.schoolId, student._id]
+    )
   ]);
+
+  const items = itemsResult.rows.map((row) => mapAttendanceRow(row));
+  const total = Number(totalResult.rows[0]?.count || 0);
 
   return res.json({
     items,
@@ -114,22 +196,30 @@ export const studentTimetable = async (req, res) => {
 
   const className = toClassName(student.grade, student.section);
 
-  const slots = await TimeTableSlot.find({ schoolId: req.user.schoolId, className })
-    .populate("teacherUserId", "fullName email")
-    .lean();
+  const slotsResult = await query(
+    `SELECT
+       ts.*,
+       u.full_name AS teacher_full_name,
+       u.email AS teacher_email
+     FROM timetable_slots ts
+     LEFT JOIN users u ON u.id = ts.teacher_user_id
+     WHERE ts.school_id = $1
+       AND ts.class_name = $2`,
+    [req.user.schoolId, className]
+  );
 
-  const weeklyTimetable = slots
-    .map((slot) => ({
-      id: slot._id,
-      className: slot.className,
-      dayOfWeek: slot.dayOfWeek,
-      periodNo: slot.periodNo,
-      startTime: slot.startTime,
-      endTime: slot.endTime,
-      subjectName: slot.subjectName,
-      roomLabel: slot.roomLabel,
-      teacherName: slot.teacherUserId?.fullName || "Teacher",
-      teacherEmail: slot.teacherUserId?.email || ""
+  const weeklyTimetable = slotsResult.rows
+    .map((row) => ({
+      id: row.id,
+      className: row.class_name,
+      dayOfWeek: row.day_of_week,
+      periodNo: row.period_no,
+      startTime: row.start_time,
+      endTime: row.end_time,
+      subjectName: row.subject_name,
+      roomLabel: row.room_label,
+      teacherName: row.teacher_full_name || "Teacher",
+      teacherEmail: row.teacher_email || ""
     }))
     .sort((a, b) => {
       if (dayOrder[a.dayOfWeek] !== dayOrder[b.dayOfWeek]) return dayOrder[a.dayOfWeek] - dayOrder[b.dayOfWeek];
@@ -145,15 +235,37 @@ export const downloadStudentReport = async (req, res) => {
     return res.status(404).json({ message: "Student profile not linked for this account" });
   }
 
-  const school = await School.findById(req.user.schoolId).lean();
+  const schoolResult = await query(
+    `SELECT *
+     FROM schools
+     WHERE id = $1
+     LIMIT 1`,
+    [req.user.schoolId]
+  );
 
-  const [performanceRecords, insightsData] = await Promise.all([
-    PerformanceRecord.find({ schoolId: req.user.schoolId, studentId: student._id })
-      .populate("subjectId", "name code")
-      .sort({ examDate: 1 })
-      .lean(),
+  const school = schoolResult.rows.length ? mapSchoolRow(schoolResult.rows[0]) : null;
+
+  if (!school) {
+    return res.status(404).json({ message: "School not found for this student" });
+  }
+
+  const [performanceResult, insightsData] = await Promise.all([
+    query(
+      `SELECT
+         pr.*,
+         subj.name AS subject_name,
+         subj.code AS subject_code
+       FROM performance_records pr
+       INNER JOIN subjects subj ON subj.id = pr.subject_id
+       WHERE pr.school_id = $1
+         AND pr.student_id = $2
+       ORDER BY pr.exam_date ASC`,
+      [req.user.schoolId, student._id]
+    ),
     evaluateStudentInsights({ schoolId: req.user.schoolId, studentId: student._id, notify: false })
   ]);
+
+  const performanceRecords = performanceResult.rows.map((row) => mapPerformanceWithSubject(row));
 
   const pdfBuffer = await buildStudentReportPdf({
     school,
@@ -169,3 +281,4 @@ export const downloadStudentReport = async (req, res) => {
   res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
   return res.send(pdfBuffer);
 };
+

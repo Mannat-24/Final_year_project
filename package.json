@@ -1,5 +1,5 @@
 {
-  "dependencies": {
-    "mysql2": "^3.19.0"
-  }
+  "name": "students-progress-tracking",
+  "private": true,
+  "version": "1.0.0"
 }

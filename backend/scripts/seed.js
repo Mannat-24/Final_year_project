@@ -1,14 +1,5 @@
 import bcrypt from "bcryptjs";
-import { connectDb } from "../src/config/db.js";
-import { AttendanceRecord } from "../src/models/AttendanceRecord.js";
-import { AllowedSchool } from "../src/models/AllowedSchool.js";
-import { Notification } from "../src/models/Notification.js";
-import { PerformanceRecord } from "../src/models/PerformanceRecord.js";
-import { School } from "../src/models/School.js";
-import { Student } from "../src/models/Student.js";
-import { Subject } from "../src/models/Subject.js";
-import { TimeTableSlot } from "../src/models/TimeTableSlot.js";
-import { User } from "../src/models/User.js";
+import { connectDb, query } from "../src/config/db.js";
 
 const buildPastDate = (daysAgo) => {
   const date = new Date();
@@ -22,31 +13,36 @@ const hashPassword = (plain) => bcrypt.hash(plain, 12);
 const seed = async () => {
   await connectDb();
 
-  await Promise.all([
-    Notification.deleteMany({}),
-    AttendanceRecord.deleteMany({}),
-    PerformanceRecord.deleteMany({}),
-    TimeTableSlot.deleteMany({}),
-    AllowedSchool.deleteMany({}),
-    User.deleteMany({}),
-    Subject.deleteMany({}),
-    Student.deleteMany({}),
-    School.deleteMany({})
-  ]);
+  await query(
+    `TRUNCATE TABLE
+      notifications,
+      attendance_records,
+      performance_records,
+      extracurricular_records,
+      timetable_slots,
+      allowed_schools,
+      users,
+      subjects,
+      students,
+      schools
+     RESTART IDENTITY CASCADE`
+  );
 
-  const school = await School.create({
-    name: "Greenfield Public School",
-    code: "GFPS01",
-    address: "Bengaluru, India",
-    contactEmail: "office@gfps.edu"
-  });
+  const schoolResult = await query(
+    `INSERT INTO schools (name, code, address, contact_email)
+     VALUES ($1, $2, $3, $4)
+     RETURNING *`,
+    ["Greenfield Public School", "GFPS01", "Bengaluru, India", "office@gfps.edu"]
+  );
+  const school = schoolResult.rows[0];
 
-  const secondSchool = await School.create({
-    name: "Horizon International School",
-    code: "HIS02",
-    address: "Pune, India",
-    contactEmail: "admin@horizon.edu"
-  });
+  const secondSchoolResult = await query(
+    `INSERT INTO schools (name, code, address, contact_email)
+     VALUES ($1, $2, $3, $4)
+     RETURNING *`,
+    ["Horizon International School", "HIS02", "Pune, India", "admin@horizon.edu"]
+  );
+  const secondSchool = secondSchoolResult.rows[0];
 
   const [ownerPassword, managerPassword, adminPassword, teacherPassword, studentPassword, parentPassword] = await Promise.all([
     hashPassword("34567890"),
@@ -57,234 +53,255 @@ const seed = async () => {
     hashPassword("Parent@123")
   ]);
 
-  const owner = await User.create({
-    fullName: "Owner",
-    email: "abc123@gmail.com",
-    passwordHash: ownerPassword,
-    role: "owner",
-    schoolId: null
-  });
+  const ownerResult = await query(
+    `INSERT INTO users (full_name, email, password_hash, role, school_id)
+     VALUES ($1, $2, $3, $4, $5)
+     RETURNING *`,
+    ["Owner", "abc123@gmail.com", ownerPassword, "owner", null]
+  );
+  const owner = ownerResult.rows[0];
 
-  await User.create({
-    fullName: "Mannat Pangotra",
-    email: "mannatpangotra29@gmail.com",
-    passwordHash: managerPassword,
-    role: "admin",
-    schoolId: school._id
-  });
-
-  await User.create({
-    fullName: "School Admin",
-    email: "admin@gfps.edu",
-    passwordHash: adminPassword,
-    role: "admin",
-    schoolId: school._id
-  });
-
-  const teacher = await User.create({
-    fullName: "Anita Sharma",
-    email: "teacher@gfps.edu",
-    passwordHash: teacherPassword,
-    role: "teacher",
-    schoolId: school._id
-  });
-
-  const studentProfile = await Student.create({
-    schoolId: school._id,
-    admissionNumber: "GFPS-1001",
-    fullName: "Rahul Verma",
-    grade: "10",
-    section: "A",
-    teacherUserIds: [teacher._id]
-  });
-
-  const secondStudent = await Student.create({
-    schoolId: school._id,
-    admissionNumber: "GFPS-1002",
-    fullName: "Aarav Gupta",
-    grade: "10",
-    section: "A",
-    teacherUserIds: [teacher._id]
-  });
-
-  const parent = await User.create({
-    fullName: "Priya Verma",
-    email: "parent@gfps.edu",
-    passwordHash: parentPassword,
-    role: "parent",
-    schoolId: school._id,
-    childStudentIds: [studentProfile._id]
-  });
-
-  const studentUser = await User.create({
-    fullName: "Rahul Verma",
-    email: "student@gfps.edu",
-    passwordHash: studentPassword,
-    role: "student",
-    schoolId: school._id,
-    studentProfileId: studentProfile._id
-  });
-
-  await Student.updateOne(
-    { _id: studentProfile._id },
-    {
-      $set: { parentUserIds: [parent._id], teacherUserIds: [teacher._id] }
-    }
+  await query(
+    `INSERT INTO users (full_name, email, password_hash, role, school_id)
+     VALUES ($1, $2, $3, $4, $5)`,
+    ["Mannat Pangotra", "mannatpangotra29@gmail.com", managerPassword, "admin", school.id]
   );
 
-  const subjects = await Subject.insertMany([
-    { schoolId: school._id, name: "Mathematics", code: "MATH", teacherUserId: teacher._id },
-    { schoolId: school._id, name: "Science", code: "SCI", teacherUserId: teacher._id },
-    { schoolId: school._id, name: "English", code: "ENG", teacherUserId: teacher._id }
-  ]);
+  await query(
+    `INSERT INTO users (full_name, email, password_hash, role, school_id)
+     VALUES ($1, $2, $3, $4, $5)`,
+    ["School Admin", "admin@gfps.edu", adminPassword, "admin", school.id]
+  );
 
-  const [math, science, english] = subjects;
+  const teacherResult = await query(
+    `INSERT INTO users (full_name, email, password_hash, role, school_id)
+     VALUES ($1, $2, $3, $4, $5)
+     RETURNING *`,
+    ["Anita Sharma", "teacher@gfps.edu", teacherPassword, "teacher", school.id]
+  );
+  const teacher = teacherResult.rows[0];
 
-  await PerformanceRecord.insertMany([
-    {
-      schoolId: school._id,
-      studentId: studentProfile._id,
-      subjectId: math._id,
-      teacherUserId: teacher._id,
-      examType: "UT-1",
-      marksObtained: 15,
-      maxMarks: 20,
-      examDate: buildPastDate(35),
-      remark: "Good start",
-      riskLevel: "Low"
-    },
-    {
-      schoolId: school._id,
-      studentId: studentProfile._id,
-      subjectId: science._id,
-      teacherUserId: teacher._id,
-      examType: "UT-1",
-      marksObtained: 9,
-      maxMarks: 20,
-      examDate: buildPastDate(35),
-      remark: "Needs concept revision",
-      riskLevel: "Medium"
-    },
-    {
-      schoolId: school._id,
-      studentId: studentProfile._id,
-      subjectId: english._id,
-      teacherUserId: teacher._id,
-      examType: "UT-1",
-      marksObtained: 14,
-      maxMarks: 20,
-      examDate: buildPastDate(35),
-      remark: "Consistent",
-      riskLevel: "Low"
-    },
-    {
-      schoolId: school._id,
-      studentId: studentProfile._id,
-      subjectId: math._id,
-      teacherUserId: teacher._id,
-      examType: "UT-2",
-      marksObtained: 11,
-      maxMarks: 20,
-      examDate: buildPastDate(15),
-      remark: "Declining attention",
-      riskLevel: "Medium"
-    },
-    {
-      schoolId: school._id,
-      studentId: studentProfile._id,
-      subjectId: science._id,
-      teacherUserId: teacher._id,
-      examType: "UT-2",
-      marksObtained: 7,
-      maxMarks: 20,
-      examDate: buildPastDate(15),
-      remark: "Critical improvement needed",
-      riskLevel: "High"
-    },
-    {
-      schoolId: school._id,
-      studentId: secondStudent._id,
-      subjectId: math._id,
-      teacherUserId: teacher._id,
-      examType: "UT-2",
-      marksObtained: 18,
-      maxMarks: 20,
-      examDate: buildPastDate(12),
-      remark: "Excellent",
-      riskLevel: "Low"
-    }
-  ]);
+  const studentProfileResult = await query(
+    `INSERT INTO students (
+      school_id,
+      admission_number,
+      full_name,
+      grade,
+      section,
+      teacher_user_ids
+    )
+    VALUES ($1, $2, $3, $4, $5, $6::uuid[])
+    RETURNING *`,
+    [school.id, "GFPS-1001", "Rahul Verma", "10", "A", [teacher.id]]
+  );
+  const studentProfile = studentProfileResult.rows[0];
 
-  await AttendanceRecord.insertMany([
-    { schoolId: school._id, studentId: studentProfile._id, teacherUserId: teacher._id, date: buildPastDate(6), status: "Present" },
-    { schoolId: school._id, studentId: studentProfile._id, teacherUserId: teacher._id, date: buildPastDate(5), status: "Absent" },
-    { schoolId: school._id, studentId: studentProfile._id, teacherUserId: teacher._id, date: buildPastDate(4), status: "Late" },
-    { schoolId: school._id, studentId: studentProfile._id, teacherUserId: teacher._id, date: buildPastDate(3), status: "Absent" },
-    { schoolId: school._id, studentId: studentProfile._id, teacherUserId: teacher._id, date: buildPastDate(2), status: "Present" },
-    { schoolId: school._id, studentId: secondStudent._id, teacherUserId: teacher._id, date: buildPastDate(2), status: "Present" }
-  ]);
+  const secondStudentResult = await query(
+    `INSERT INTO students (
+      school_id,
+      admission_number,
+      full_name,
+      grade,
+      section,
+      teacher_user_ids
+    )
+    VALUES ($1, $2, $3, $4, $5, $6::uuid[])
+    RETURNING *`,
+    [school.id, "GFPS-1002", "Aarav Gupta", "10", "A", [teacher.id]]
+  );
+  const secondStudent = secondStudentResult.rows[0];
 
-  await TimeTableSlot.insertMany([
-    {
-      schoolId: school._id,
-      className: "Class 10-A",
-      dayOfWeek: "Monday",
-      periodNo: 1,
-      startTime: "08:00",
-      endTime: "08:45",
-      subjectName: "Mathematics",
-      roomLabel: "Room 101",
-      teacherUserId: teacher._id
-    },
-    {
-      schoolId: school._id,
-      className: "Class 10-A",
-      dayOfWeek: "Monday",
-      periodNo: 2,
-      startTime: "08:50",
-      endTime: "09:35",
-      subjectName: "Science",
-      roomLabel: "Lab 2",
-      teacherUserId: teacher._id
-    },
-    {
-      schoolId: school._id,
-      className: "Class 10-A",
-      dayOfWeek: "Tuesday",
-      periodNo: 1,
-      startTime: "08:00",
-      endTime: "08:45",
-      subjectName: "English",
-      roomLabel: "Room 103",
-      teacherUserId: teacher._id
-    }
-  ]);
+  const parentResult = await query(
+    `INSERT INTO users (
+      full_name,
+      email,
+      password_hash,
+      role,
+      school_id,
+      child_student_ids
+    )
+    VALUES ($1, $2, $3, $4, $5, $6::uuid[])
+    RETURNING *`,
+    ["Priya Verma", "parent@gfps.edu", parentPassword, "parent", school.id, [studentProfile.id]]
+  );
+  const parent = parentResult.rows[0];
 
-  await Notification.insertMany([
-    {
-      schoolId: school._id,
-      recipientUserId: parent._id,
-      senderUserId: teacher._id,
-      studentId: studentProfile._id,
-      type: "attendance",
-      title: "Low attendance detected",
-      message: "Rahul has frequent absences in the past week."
-    },
-    {
-      schoolId: school._id,
-      recipientUserId: studentUser._id,
-      senderUserId: teacher._id,
-      studentId: studentProfile._id,
-      type: "performance",
-      title: "Science performance alert",
-      message: "Science score dropped below 40%."
-    }
-  ]);
+  const studentUserResult = await query(
+    `INSERT INTO users (
+      full_name,
+      email,
+      password_hash,
+      role,
+      school_id,
+      student_profile_id
+    )
+    VALUES ($1, $2, $3, $4, $5, $6)
+    RETURNING *`,
+    ["Rahul Verma", "student@gfps.edu", studentPassword, "student", school.id, studentProfile.id]
+  );
+  const studentUser = studentUserResult.rows[0];
 
-  await AllowedSchool.insertMany([
-    { schoolId: school._id, updatedBy: owner._id },
-    { schoolId: secondSchool._id, updatedBy: owner._id }
-  ]);
+  await query(
+    `UPDATE students
+     SET parent_user_ids = $1::uuid[],
+         teacher_user_ids = $2::uuid[]
+     WHERE id = $3`,
+    [[parent.id], [teacher.id], studentProfile.id]
+  );
+
+  const mathResult = await query(
+    `INSERT INTO subjects (school_id, name, code, teacher_user_id)
+     VALUES ($1, $2, $3, $4)
+     RETURNING *`,
+    [school.id, "Mathematics", "MATH", teacher.id]
+  );
+  const math = mathResult.rows[0];
+
+  const scienceResult = await query(
+    `INSERT INTO subjects (school_id, name, code, teacher_user_id)
+     VALUES ($1, $2, $3, $4)
+     RETURNING *`,
+    [school.id, "Science", "SCI", teacher.id]
+  );
+  const science = scienceResult.rows[0];
+
+  const englishResult = await query(
+    `INSERT INTO subjects (school_id, name, code, teacher_user_id)
+     VALUES ($1, $2, $3, $4)
+     RETURNING *`,
+    [school.id, "English", "ENG", teacher.id]
+  );
+  const english = englishResult.rows[0];
+
+  const performanceRows = [
+    [school.id, studentProfile.id, math.id, teacher.id, "UT-1", 15, 20, buildPastDate(35), "Good start", "Low"],
+    [school.id, studentProfile.id, science.id, teacher.id, "UT-1", 9, 20, buildPastDate(35), "Needs concept revision", "Medium"],
+    [school.id, studentProfile.id, english.id, teacher.id, "UT-1", 14, 20, buildPastDate(35), "Consistent", "Low"],
+    [school.id, studentProfile.id, math.id, teacher.id, "UT-2", 11, 20, buildPastDate(15), "Declining attention", "Medium"],
+    [school.id, studentProfile.id, science.id, teacher.id, "UT-2", 7, 20, buildPastDate(15), "Critical improvement needed", "High"],
+    [school.id, secondStudent.id, math.id, teacher.id, "UT-2", 18, 20, buildPastDate(12), "Excellent", "Low"]
+  ];
+
+  for (const row of performanceRows) {
+    await query(
+      `INSERT INTO performance_records (
+        school_id,
+        student_id,
+        subject_id,
+        teacher_user_id,
+        exam_type,
+        marks_obtained,
+        max_marks,
+        exam_date,
+        remark,
+        risk_level
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      row
+    );
+  }
+
+  const attendanceRows = [
+    [school.id, studentProfile.id, teacher.id, buildPastDate(6), "Present"],
+    [school.id, studentProfile.id, teacher.id, buildPastDate(5), "Absent"],
+    [school.id, studentProfile.id, teacher.id, buildPastDate(4), "Late"],
+    [school.id, studentProfile.id, teacher.id, buildPastDate(3), "Absent"],
+    [school.id, studentProfile.id, teacher.id, buildPastDate(2), "Present"],
+    [school.id, secondStudent.id, teacher.id, buildPastDate(2), "Present"]
+  ];
+
+  for (const row of attendanceRows) {
+    await query(
+      `INSERT INTO attendance_records (
+        school_id,
+        student_id,
+        teacher_user_id,
+        date,
+        status
+      )
+      VALUES ($1, $2, $3, $4::date, $5)
+      ON CONFLICT (student_id, date)
+      DO UPDATE SET
+        school_id = EXCLUDED.school_id,
+        teacher_user_id = EXCLUDED.teacher_user_id,
+        status = EXCLUDED.status`,
+      [row[0], row[1], row[2], row[3].toISOString().slice(0, 10), row[4]]
+    );
+  }
+
+  const timetableRows = [
+    [school.id, "Class 10-A", "Monday", 1, "08:00", "08:45", "Mathematics", "Room 101", teacher.id],
+    [school.id, "Class 10-A", "Monday", 2, "08:50", "09:35", "Science", "Lab 2", teacher.id],
+    [school.id, "Class 10-A", "Tuesday", 1, "08:00", "08:45", "English", "Room 103", teacher.id]
+  ];
+
+  for (const row of timetableRows) {
+    await query(
+      `INSERT INTO timetable_slots (
+        school_id,
+        class_name,
+        day_of_week,
+        period_no,
+        start_time,
+        end_time,
+        subject_name,
+        room_label,
+        teacher_user_id
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      row
+    );
+  }
+
+  await query(
+    `INSERT INTO notifications (
+      school_id,
+      recipient_user_id,
+      sender_user_id,
+      student_id,
+      type,
+      title,
+      message
+    )
+    VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    [
+      school.id,
+      parent.id,
+      teacher.id,
+      studentProfile.id,
+      "attendance",
+      "Low attendance detected",
+      "Rahul has frequent absences in the past week."
+    ]
+  );
+
+  await query(
+    `INSERT INTO notifications (
+      school_id,
+      recipient_user_id,
+      sender_user_id,
+      student_id,
+      type,
+      title,
+      message
+    )
+    VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    [
+      school.id,
+      studentUser.id,
+      teacher.id,
+      studentProfile.id,
+      "performance",
+      "Science performance alert",
+      "Science score dropped below 40%."
+    ]
+  );
+
+  await query(
+    `INSERT INTO allowed_schools (school_id, updated_by)
+     VALUES ($1, $2), ($3, $2)`,
+    [school.id, owner.id, secondSchool.id]
+  );
 
   console.log("Seed complete");
   console.log("School codes: GFPS01, HIS02");

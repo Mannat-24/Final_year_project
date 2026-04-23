@@ -1,5 +1,6 @@
 import { emitUserEvent } from "../config/socket.js";
-import { Notification } from "../models/Notification.js";
+import { query } from "../config/db.js";
+import { mapNotificationRow } from "../db/mappers.js";
 
 export const createNotifications = async ({
   schoolId,
@@ -14,32 +15,72 @@ export const createNotifications = async ({
   const dedupedRecipients = [...new Set((recipientUserIds || []).map(String))].filter(Boolean);
   if (!dedupedRecipients.length) return [];
 
-  const payload = dedupedRecipients.map((recipientUserId) => ({
-    schoolId,
-    recipientUserId,
-    senderUserId: senderUserId || null,
-    studentId: studentId || null,
-    type,
-    title,
-    message,
-    metadata
-  }));
+  const created = [];
 
-  const created = await Notification.insertMany(payload);
+  for (const recipientUserId of dedupedRecipients) {
+    const { rows } = await query(
+      `INSERT INTO notifications (
+        school_id,
+        recipient_user_id,
+        sender_user_id,
+        student_id,
+        type,
+        title,
+        message,
+        metadata
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+      RETURNING *`,
+      [
+        schoolId,
+        recipientUserId,
+        senderUserId || null,
+        studentId || null,
+        type,
+        title,
+        message,
+        JSON.stringify(metadata || {})
+      ]
+    );
 
-  created.forEach((item) => {
+    const item = mapNotificationRow(rows[0]);
+    created.push(item);
+
     emitUserEvent(String(item.recipientUserId), "notification:new", item);
-  });
+  }
 
   return created;
 };
 
 export const listNotificationsForUser = async (userId, { page, limit, skip }) => {
-  const [items, total, unreadCount] = await Promise.all([
-    Notification.find({ recipientUserId: userId }).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
-    Notification.countDocuments({ recipientUserId: userId }),
-    Notification.countDocuments({ recipientUserId: userId, isRead: false })
+  const [itemsResult, totalResult, unreadResult] = await Promise.all([
+    query(
+      `SELECT *
+       FROM notifications
+       WHERE recipient_user_id = $1
+       ORDER BY created_at DESC
+       OFFSET $2
+       LIMIT $3`,
+      [userId, skip, limit]
+    ),
+    query(
+      `SELECT COUNT(*)::int AS count
+       FROM notifications
+       WHERE recipient_user_id = $1`,
+      [userId]
+    ),
+    query(
+      `SELECT COUNT(*)::int AS count
+       FROM notifications
+       WHERE recipient_user_id = $1
+         AND is_read = FALSE`,
+      [userId]
+    )
   ]);
 
-  return { items, total, unreadCount };
+  return {
+    items: itemsResult.rows.map((row) => mapNotificationRow(row)),
+    total: Number(totalResult.rows[0]?.count || 0),
+    unreadCount: Number(unreadResult.rows[0]?.count || 0)
+  };
 };

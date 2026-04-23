@@ -3,8 +3,8 @@ import { body } from "express-validator";
 const dayValues = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
 export const upsertPerformanceValidator = [
-  body("studentId").isMongoId().withMessage("studentId is required"),
-  body("subjectId").isMongoId().withMessage("subjectId is required"),
+  body("studentId").isUUID().withMessage("studentId is required"),
+  body("subjectId").isUUID().withMessage("subjectId is required"),
   body("examType").trim().isLength({ min: 1 }).withMessage("examType is required"),
   body("marksObtained").isFloat({ min: 0 }).withMessage("marksObtained must be >= 0"),
   body("maxMarks").isFloat({ min: 1 }).withMessage("maxMarks must be >= 1"),
@@ -13,7 +13,7 @@ export const upsertPerformanceValidator = [
 ];
 
 export const upsertAttendanceValidator = [
-  body("studentId").isMongoId().withMessage("studentId is required"),
+  body("studentId").isUUID().withMessage("studentId is required"),
   body("date").isISO8601().withMessage("date must be valid ISO date"),
   body("status").isIn(["Present", "Absent", "Late"]).withMessage("Invalid status"),
   body("remark").optional().isString()
@@ -36,8 +36,8 @@ export const deleteTimetableSlotValidator = [
 ];
 
 export const upsertExtracurricularValidator = [
-  body("recordId").optional().isMongoId().withMessage("recordId must be a valid MongoId"),
-  body("studentId").isMongoId().withMessage("studentId is required"),
+  body("recordId").optional().isUUID().withMessage("recordId must be a valid UUID"),
+  body("studentId").isUUID().withMessage("studentId is required"),
   body("activityType").trim().isLength({ min: 2 }).withMessage("activityType is required"),
   body("activityName").trim().isLength({ min: 2 }).withMessage("activityName is required"),
   body("level").optional().trim().isLength({ min: 2 }),

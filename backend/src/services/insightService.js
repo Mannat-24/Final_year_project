@@ -1,6 +1,5 @@
-import { AttendanceRecord } from "../models/AttendanceRecord.js";
-import { PerformanceRecord } from "../models/PerformanceRecord.js";
-import { Student } from "../models/Student.js";
+import { query } from "../config/db.js";
+import { mapStudentRow } from "../db/mappers.js";
 import { createNotifications } from "./notificationService.js";
 import { predictRiskLevel } from "./mlService.js";
 
@@ -10,27 +9,48 @@ const percentage = (obtained, max) => {
 };
 
 export const getAttendancePercentage = async (schoolId, studentId) => {
-  const [total, presentOrLate] = await Promise.all([
-    AttendanceRecord.countDocuments({ schoolId, studentId }),
-    AttendanceRecord.countDocuments({
-      schoolId,
-      studentId,
-      status: { $in: ["Present", "Late"] }
-    })
+  const [totalResult, presentOrLateResult] = await Promise.all([
+    query(
+      `SELECT COUNT(*)::int AS count
+       FROM attendance_records
+       WHERE school_id = $1
+         AND student_id = $2`,
+      [schoolId, studentId]
+    ),
+    query(
+      `SELECT COUNT(*)::int AS count
+       FROM attendance_records
+       WHERE school_id = $1
+         AND student_id = $2
+         AND status IN ('Present', 'Late')`,
+      [schoolId, studentId]
+    )
   ]);
+
+  const total = Number(totalResult.rows[0]?.count || 0);
+  const presentOrLate = Number(presentOrLateResult.rows[0]?.count || 0);
 
   if (!total) return 0;
   return Number(((presentOrLate / total) * 100).toFixed(2));
 };
 
 export const getAverageMarksPercentage = async (schoolId, studentId) => {
-  const records = await PerformanceRecord.find({ schoolId, studentId })
-    .select("marksObtained maxMarks")
-    .lean();
+  const { rows } = await query(
+    `SELECT marks_obtained, max_marks
+     FROM performance_records
+     WHERE school_id = $1
+       AND student_id = $2`,
+    [schoolId, studentId]
+  );
 
-  if (!records.length) return 0;
-  const totalPct = records.reduce((sum, item) => sum + percentage(item.marksObtained, item.maxMarks), 0);
-  return Number((totalPct / records.length).toFixed(2));
+  if (!rows.length) return 0;
+
+  const totalPct = rows.reduce(
+    (sum, item) => sum + percentage(Number(item.marks_obtained), Number(item.max_marks)),
+    0
+  );
+
+  return Number((totalPct / rows.length).toFixed(2));
 };
 
 const buildDeclineInsights = (records) => {
@@ -72,8 +92,16 @@ export const evaluateStudentInsights = async ({
   senderUserId,
   notify = true
 }) => {
-  const student = await Student.findOne({ _id: studentId, schoolId }).lean();
-  if (!student) {
+  const studentResult = await query(
+    `SELECT *
+     FROM students
+     WHERE id = $1
+       AND school_id = $2
+     LIMIT 1`,
+    [studentId, schoolId]
+  );
+
+  if (!studentResult.rows.length) {
     return {
       insights: [],
       riskLevel: "Low",
@@ -83,11 +111,39 @@ export const evaluateStudentInsights = async ({
     };
   }
 
-  const performanceRecords = await PerformanceRecord.find({ schoolId, studentId })
-    .populate("subjectId", "name")
-    .sort({ examDate: -1 })
-    .limit(40)
-    .lean();
+  const student = mapStudentRow(studentResult.rows[0]);
+
+  const performanceResult = await query(
+    `SELECT
+       pr.*,
+       subj.name AS subject_name
+     FROM performance_records pr
+     INNER JOIN subjects subj ON subj.id = pr.subject_id
+     WHERE pr.school_id = $1
+       AND pr.student_id = $2
+     ORDER BY pr.exam_date DESC
+     LIMIT 40`,
+    [schoolId, studentId]
+  );
+
+  const performanceRecords = performanceResult.rows.map((row) => ({
+    _id: row.id,
+    schoolId: row.school_id,
+    studentId: row.student_id,
+    subjectId: {
+      _id: row.subject_id,
+      name: row.subject_name
+    },
+    teacherUserId: row.teacher_user_id,
+    examType: row.exam_type,
+    marksObtained: Number(row.marks_obtained),
+    maxMarks: Number(row.max_marks),
+    examDate: row.exam_date,
+    remark: row.remark || "",
+    riskLevel: row.risk_level || "Low",
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  }));
 
   const attendancePercentage = await getAttendancePercentage(schoolId, studentId);
 
@@ -111,10 +167,13 @@ export const evaluateStudentInsights = async ({
   if (attendancePercentage < 75) {
     insights.push("Low attendance detected");
   }
+
   insights.push(...buildDeclineInsights(performanceRecords));
+
   if (averageMarks < 50) {
     insights.push("Overall academic performance needs attention");
   }
+
   if (mlPrediction.riskLevel === "High") {
     insights.push("High risk level detected by predictive model");
   }

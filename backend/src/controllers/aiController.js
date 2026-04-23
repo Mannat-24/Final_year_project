@@ -1,17 +1,17 @@
-import { PerformanceRecord } from "../models/PerformanceRecord.js";
-import { Student } from "../models/Student.js";
+import { query } from "../config/db.js";
+import { mapStudentRow } from "../db/mappers.js";
 import { buildAiChatReply } from "../services/chatService.js";
 import { evaluateStudentInsights } from "../services/insightService.js";
 
 const examRank = {
   "UT-1": 1,
-  "UT1": 1,
+  UT1: 1,
   "UT-2": 2,
-  "UT2": 2,
+  UT2: 2,
   "TERM-1": 3,
-  "TERM1": 3,
+  TERM1: 3,
   "TERM-2": 4,
-  "TERM2": 4,
+  TERM2: 4,
   ANNUAL: 5,
   FINAL: 6
 };
@@ -97,19 +97,52 @@ const computeYearlyInsights = ({ records, subjectAverages, riskLevel }) => {
 const resolveStudentForTeacher = async ({ schoolId, studentCode, message }) => {
   const explicitCode = String(studentCode || "").trim();
   if (explicitCode) {
-    return Student.findOne({ schoolId, admissionNumber: explicitCode }).lean();
+    const { rows } = await query(
+      `SELECT *
+       FROM students
+       WHERE school_id = $1
+         AND admission_number = $2
+       LIMIT 1`,
+      [schoolId, explicitCode]
+    );
+
+    return rows.length ? mapStudentRow(rows[0]) : null;
   }
 
   const text = String(message || "");
   const codeFromMessage = text.match(/[A-Za-z]{1,10}-?\d{2,10}/)?.[0];
   if (codeFromMessage) {
-    const student = await Student.findOne({ schoolId, admissionNumber: codeFromMessage }).lean();
-    if (student) return student;
+    const { rows } = await query(
+      `SELECT *
+       FROM students
+       WHERE school_id = $1
+         AND admission_number = $2
+       LIMIT 1`,
+      [schoolId, codeFromMessage]
+    );
+
+    if (rows.length) return mapStudentRow(rows[0]);
   }
 
-  const count = await Student.countDocuments({ schoolId });
+  const countResult = await query(
+    `SELECT COUNT(*)::int AS count
+     FROM students
+     WHERE school_id = $1`,
+    [schoolId]
+  );
+
+  const count = Number(countResult.rows[0]?.count || 0);
+
   if (count === 1) {
-    return Student.findOne({ schoolId }).lean();
+    const { rows } = await query(
+      `SELECT *
+       FROM students
+       WHERE school_id = $1
+       LIMIT 1`,
+      [schoolId]
+    );
+
+    return rows.length ? mapStudentRow(rows[0]) : null;
   }
 
   return null;
@@ -129,10 +162,16 @@ export const chatWithAi = async (req, res) => {
       return res.status(400).json({ message: "Student profile not linked" });
     }
 
-    targetStudent = await Student.findOne({
-      _id: req.user.studentProfileId,
-      schoolId: req.user.schoolId
-    }).lean();
+    const studentResult = await query(
+      `SELECT *
+       FROM students
+       WHERE id = $1
+         AND school_id = $2
+       LIMIT 1`,
+      [req.user.studentProfileId, req.user.schoolId]
+    );
+
+    targetStudent = studentResult.rows.length ? mapStudentRow(studentResult.rows[0]) : null;
   }
 
   if (req.user.role === "teacher") {
@@ -159,14 +198,35 @@ export const chatWithAi = async (req, res) => {
   let aiSuggestions = [];
 
   if (targetStudent) {
-    const records = await PerformanceRecord.find({
-      schoolId: req.user.schoolId,
-      studentId: targetStudent._id
-    })
-      .populate("subjectId", "name")
-      .sort({ examDate: -1 })
-      .limit(80)
-      .lean();
+    const recordsResult = await query(
+      `SELECT
+         pr.*,
+         subj.name AS subject_name
+       FROM performance_records pr
+       INNER JOIN subjects subj ON subj.id = pr.subject_id
+       WHERE pr.school_id = $1
+         AND pr.student_id = $2
+       ORDER BY pr.exam_date DESC
+       LIMIT 80`,
+      [req.user.schoolId, targetStudent._id]
+    );
+
+    const records = recordsResult.rows.map((row) => ({
+      _id: row.id,
+      schoolId: row.school_id,
+      studentId: row.student_id,
+      subjectId: {
+        _id: row.subject_id,
+        name: row.subject_name
+      },
+      teacherUserId: row.teacher_user_id,
+      examType: row.exam_type,
+      marksObtained: Number(row.marks_obtained),
+      maxMarks: Number(row.max_marks),
+      examDate: row.exam_date,
+      remark: row.remark || "",
+      riskLevel: row.risk_level || "Low"
+    }));
 
     const insightData = await evaluateStudentInsights({
       schoolId: req.user.schoolId,

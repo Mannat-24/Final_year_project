@@ -1,4 +1,4 @@
-import { coreDb } from "../config/db.js";
+import { query } from "../config/db.js";
 import { verifyToken } from "../utils/jwt.js";
 import {
   registerRealtimeSubscriber,
@@ -18,29 +18,19 @@ const getTokenFromRequest = (req) => {
   return "";
 };
 
-const isDomainAllowed = async (domain) => {
-  const [rows] = await coreDb.query(
-    "SELECT id FROM allowed_personal_domains WHERE domain = ? LIMIT 1",
-    [String(domain || "").trim().toLowerCase()]
-  );
-  return rows.length > 0;
-};
+const isSchoolAllowed = async (schoolId) => {
+  if (!schoolId) return false;
 
-const validateSession = async (user) => {
-  if (!user?.sessionId) return false;
-
-  const [sessionRows] = await coreDb.query(
-    `SELECT id
-     FROM user_sessions
-     WHERE session_id = ? AND user_id = ? AND revoked = 0 AND expires_at > NOW()
+  const { rows } = await query(
+    `SELECT s.id
+     FROM schools s
+     INNER JOIN allowed_schools a ON a.school_id = s.id
+     WHERE s.id = $1 AND s.is_active = TRUE
      LIMIT 1`,
-    [user.sessionId, user.id]
+    [schoolId]
   );
 
-  if (!sessionRows.length) return false;
-
-  await coreDb.query("UPDATE user_sessions SET last_seen_at = NOW() WHERE session_id = ?", [user.sessionId]);
-  return true;
+  return rows.length > 0;
 };
 
 export const realtimeStream = async (req, res, next) => {
@@ -50,22 +40,35 @@ export const realtimeStream = async (req, res, next) => {
       return res.status(401).json({ message: "Realtime auth token missing" });
     }
 
-    let user;
+    let payload;
     try {
-      user = verifyToken(token);
+      payload = verifyToken(token);
     } catch {
       return res.status(401).json({ message: "Invalid realtime token" });
     }
 
-    const activeSession = await validateSession(user);
-    if (!activeSession) {
+    const userResult = await query(
+      `SELECT id, role, school_id, is_active
+       FROM users
+       WHERE id = $1
+       LIMIT 1`,
+      [String(payload.sub)]
+    );
+
+    if (!userResult.rows.length || !userResult.rows[0].is_active) {
       return res.status(401).json({ message: "Session expired. Please login again" });
     }
 
+    const user = {
+      id: userResult.rows[0].id,
+      role: userResult.rows[0].role,
+      schoolId: userResult.rows[0].school_id
+    };
+
     if (user.role !== "owner") {
-      const allowed = await isDomainAllowed(user.domain);
+      const allowed = await isSchoolAllowed(user.schoolId);
       if (!allowed) {
-        return res.status(403).json({ message: "Domain access blocked by owner" });
+        return res.status(403).json({ message: "School access blocked by owner" });
       }
     }
 
@@ -79,13 +82,13 @@ export const realtimeStream = async (req, res, next) => {
 
     const subscriberId = registerRealtimeSubscriber({
       res,
-      domain: user.domain,
+      domain: String(user.schoolId || ""),
       role: user.role,
       userId: user.id
     });
 
     sendRealtimeConnected(res, {
-      domain: user.domain,
+      schoolId: user.schoolId,
       role: user.role,
       connectedAt: new Date().toISOString()
     });

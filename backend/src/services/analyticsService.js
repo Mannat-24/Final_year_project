@@ -1,152 +1,98 @@
-import mongoose from "mongoose";
-import { AttendanceRecord } from "../models/AttendanceRecord.js";
-import { PerformanceRecord } from "../models/PerformanceRecord.js";
-import { User } from "../models/User.js";
+import { query } from "../config/db.js";
+
+const toNumber = (value, fallback = 0) => {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : fallback;
+};
 
 export const getSchoolAnalytics = async (schoolId) => {
-  const schoolObjectId = new mongoose.Types.ObjectId(String(schoolId));
-
-  const [subjectAverages, attendanceSummary, performanceTrend, userBreakdown, classAttendance] = await Promise.all([
-    PerformanceRecord.aggregate([
-      { $match: { schoolId: schoolObjectId } },
-      {
-        $addFields: {
-          percentage: {
-            $multiply: [{ $divide: ["$marksObtained", "$maxMarks"] }, 100]
-          }
-        }
-      },
-      {
-        $group: {
-          _id: "$subjectId",
-          averageMarks: { $avg: "$percentage" },
-          recordCount: { $sum: 1 }
-        }
-      },
-      {
-        $lookup: {
-          from: "subjects",
-          localField: "_id",
-          foreignField: "_id",
-          as: "subject"
-        }
-      },
-      { $unwind: "$subject" },
-      {
-        $project: {
-          _id: 0,
-          subjectId: "$subject._id",
-          subjectName: "$subject.name",
-          averageMarks: { $round: ["$averageMarks", 2] },
-          recordCount: 1
-        }
-      },
-      { $sort: { averageMarks: -1 } }
-    ]),
-    AttendanceRecord.aggregate([
-      { $match: { schoolId: schoolObjectId } },
-      {
-        $group: {
-          _id: "$status",
-          count: { $sum: 1 }
-        }
-      }
-    ]),
-    PerformanceRecord.aggregate([
-      { $match: { schoolId: schoolObjectId } },
-      {
-        $addFields: {
-          percentage: {
-            $multiply: [{ $divide: ["$marksObtained", "$maxMarks"] }, 100]
-          },
-          month: { $dateToString: { format: "%Y-%m", date: "$examDate" } }
-        }
-      },
-      {
-        $group: {
-          _id: "$month",
-          avgScore: { $avg: "$percentage" }
-        }
-      },
-      { $sort: { _id: 1 } },
-      {
-        $project: {
-          _id: 0,
-          month: "$_id",
-          avgScore: { $round: ["$avgScore", 2] }
-        }
-      }
-    ]),
-    User.aggregate([
-      { $match: { schoolId: schoolObjectId } },
-      {
-        $group: {
-          _id: "$role",
-          count: { $sum: 1 }
-        }
-      },
-      {
-        $project: {
-          _id: 0,
-          role: "$_id",
-          count: 1
-        }
-      }
-    ]),
-    AttendanceRecord.aggregate([
-      { $match: { schoolId: schoolObjectId } },
-      {
-        $lookup: {
-          from: "students",
-          localField: "studentId",
-          foreignField: "_id",
-          as: "student"
-        }
-      },
-      { $unwind: "$student" },
-      {
-        $group: {
-          _id: {
-            grade: "$student.grade",
-            section: "$student.section"
-          },
-          totalRecords: { $sum: 1 },
-          presentLike: {
-            $sum: {
-              $cond: [{ $in: ["$status", ["Present", "Late"]] }, 1, 0]
-            }
-          },
-          absent: {
-            $sum: {
-              $cond: [{ $eq: ["$status", "Absent"] }, 1, 0]
-            }
-          }
-        }
-      },
-      {
-        $project: {
-          _id: 0,
-          grade: "$_id.grade",
-          section: "$_id.section",
-          className: {
-            $concat: ["Class ", { $toString: "$_id.grade" }, "-", { $toString: "$_id.section" }]
-          },
-          totalRecords: 1,
-          presentLike: 1,
-          absent: 1,
-          attendancePercentage: {
-            $round: [
-              {
-                $multiply: [{ $divide: ["$presentLike", "$totalRecords"] }, 100]
-              },
-              2
-            ]
-          }
-        }
-      },
-      { $sort: { grade: 1, section: 1 } }
-    ])
+  const [subjectRows, attendanceRows, trendRows, userRows, classRows] = await Promise.all([
+    query(
+      `SELECT
+         pr.subject_id AS subject_id,
+         subj.name AS subject_name,
+         ROUND(AVG((pr.marks_obtained / pr.max_marks) * 100), 2) AS average_marks,
+         COUNT(*)::int AS record_count
+       FROM performance_records pr
+       INNER JOIN subjects subj ON subj.id = pr.subject_id
+       WHERE pr.school_id = $1
+       GROUP BY pr.subject_id, subj.name
+       ORDER BY average_marks DESC`,
+      [schoolId]
+    ),
+    query(
+      `SELECT status, COUNT(*)::int AS count
+       FROM attendance_records
+       WHERE school_id = $1
+       GROUP BY status`,
+      [schoolId]
+    ),
+    query(
+      `SELECT
+         TO_CHAR(pr.exam_date, 'YYYY-MM') AS month,
+         ROUND(AVG((pr.marks_obtained / pr.max_marks) * 100), 2) AS avg_score
+       FROM performance_records pr
+       WHERE pr.school_id = $1
+       GROUP BY month
+       ORDER BY month`,
+      [schoolId]
+    ),
+    query(
+      `SELECT role, COUNT(*)::int AS count
+       FROM users
+       WHERE school_id = $1
+       GROUP BY role`,
+      [schoolId]
+    ),
+    query(
+      `SELECT
+         st.grade,
+         st.section,
+         CONCAT('Class ', st.grade, '-', st.section) AS class_name,
+         COUNT(*)::int AS total_records,
+         SUM(CASE WHEN ar.status IN ('Present', 'Late') THEN 1 ELSE 0 END)::int AS present_like,
+         SUM(CASE WHEN ar.status = 'Absent' THEN 1 ELSE 0 END)::int AS absent,
+         ROUND((SUM(CASE WHEN ar.status IN ('Present', 'Late') THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0)) * 100, 2) AS attendance_percentage
+       FROM attendance_records ar
+       INNER JOIN students st ON st.id = ar.student_id
+       WHERE ar.school_id = $1
+       GROUP BY st.grade, st.section
+       ORDER BY st.grade, st.section`,
+      [schoolId]
+    )
   ]);
+
+  const subjectAverages = subjectRows.rows.map((row) => ({
+    subjectId: row.subject_id,
+    subjectName: row.subject_name,
+    averageMarks: toNumber(row.average_marks),
+    recordCount: toNumber(row.record_count)
+  }));
+
+  const attendanceSummary = attendanceRows.rows.map((row) => ({
+    _id: row.status,
+    count: toNumber(row.count)
+  }));
+
+  const performanceTrend = trendRows.rows.map((row) => ({
+    month: row.month,
+    avgScore: toNumber(row.avg_score)
+  }));
+
+  const userBreakdown = userRows.rows.map((row) => ({
+    role: row.role,
+    count: toNumber(row.count)
+  }));
+
+  const classAttendance = classRows.rows.map((row) => ({
+    grade: row.grade,
+    section: row.section,
+    className: row.class_name,
+    totalRecords: toNumber(row.total_records),
+    presentLike: toNumber(row.present_like),
+    absent: toNumber(row.absent),
+    attendancePercentage: toNumber(row.attendance_percentage)
+  }));
 
   const totalAttendance = attendanceSummary.reduce((sum, entry) => sum + entry.count, 0);
   const presentLike = attendanceSummary
